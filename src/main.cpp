@@ -1,137 +1,119 @@
 #include <Arduino.h>
 
-// ===============================
-// UART STM32
-// ===============================
 #define STM_RX   16
 #define STM_TX   17
 #define STM_BAUD 115200
 
 HardwareSerial STM(2);
 
-// ===============================
-// Buffers y estado
-// ===============================
-static char rxLine[128];
-static uint8_t rxIdx = 0;
-
-static uint32_t lastModeSend = 0;
+/* ===== CONFIGURACIÓN FIJA ===== */
+static const int SP_CM = 12;              // setpoint fijo
+static const uint32_t SP_PERIOD_MS = 2000;
 static const uint32_t MODE_PERIOD_MS = 5000;
+
+/* ===== VARIABLES ===== */
+static char rxLine[160];
+static uint16_t rxIdx = 0;
+
+static uint32_t lastSPSend   = 0;
+static uint32_t lastModeSend = 0;
 static int mode = 0;
 
-// ===============================
-// Utilidades
-// ===============================
 static float x100_to_float(long v) {
   return (float)v / 100.0f;
 }
 
-// ===============================
-// Procesamiento de mensajes STM32
-// ===============================
+/* ===== PROCESAR MENSAJES STM32 ===== */
 static void processLine(const char *line)
 {
-  // ACK_MODE,<m>
-  if (strncmp(line, "ACK_MODE,", 9) == 0) {
-    int m = atoi(line + 9);
-    Serial.print("ACK STM32 MODE=");
-    Serial.println(m);
+  if (strncmp(line, "T,", 2) == 0) {
+    long d = 0, sp = 0, u = 0, m = 0;
+
+    if (sscanf(line, "T,%ld,%ld,%ld,%ld", &d, &sp, &u, &m) == 4) {
+      Serial.print("Nivel(cm)=");
+      Serial.print(x100_to_float(d), 2);
+      Serial.print("   SP=");
+      Serial.print(x100_to_float(sp), 2);
+      Serial.print("   u=");
+      Serial.print(x100_to_float(u), 2);
+      Serial.print("   MODE=");
+      Serial.println((int)m);
+      return;
+    }
+  }
+
+  if (strncmp(line, "ACK_SP,", 7) == 0) {
+    Serial.print("ACK SP=");
+    Serial.println(x100_to_float(atol(line + 7)), 2);
     return;
   }
 
-  // MODE_SET / MODE_NOW / HB
-  if (strncmp(line, "MODE_SET", 8) == 0 ||
-      strncmp(line, "MODE_NOW", 8) == 0 ||
-      strncmp(line, "HB", 2) == 0) {
-
-    long sp_x100 = 0;
-    long mode_i = 0;
-
-    if (sscanf(line, "%*[^,],SP=%ld,MODE=%ld", &sp_x100, &mode_i) == 2) {
-      Serial.print("[");
-      Serial.print(strncmp(line, "HB", 2) == 0 ? "HB" : "MODE");
-      Serial.print("] SP=");
-      Serial.print(x100_to_float(sp_x100), 2);
-      Serial.print("   MODE=");
-      Serial.println((int)mode_i);
-      return;
-    }
+  if (strncmp(line, "ACK_MODE,", 9) == 0) {
+    Serial.print("ACK MODE=");
+    Serial.println(atoi(line + 9));
+    return;
   }
 
-  // D,<dist>,SP=<x100>,MODE=<m>
-  if (strncmp(line, "D,", 2) == 0) {
-    int dist = 0;
-    long sp_x100 = 0;
-    long mode_i = 0;
-
-    if (sscanf(line, "D,%d,SP=%ld,MODE=%ld", &dist, &sp_x100, &mode_i) == 3) {
-      Serial.print("Nivel(cm)=");
-      Serial.print(dist);
-      Serial.print("   SP=");
-      Serial.print(x100_to_float(sp_x100), 2);
-      Serial.print("   MODE=");
-      Serial.println((int)mode_i);
-      return;
-    }
-  }
-
-  // Mensaje genérico
   Serial.print("STM32: ");
   Serial.println(line);
 }
 
-// ===============================
-// Setup
-// ===============================
-void setup() {
+void setup()
+{
   Serial.begin(115200);
   delay(300);
 
   STM.begin(STM_BAUD, SERIAL_8N1, STM_RX, STM_TX);
 
-  Serial.println("ESP32 UART listo (PlatformIO)");
-  Serial.println("Envio: SP una vez y luego alterno MODE cada 5s");
+  Serial.println("ESP32 AUTO UART");
+  Serial.println("SP fijo y cambio automatico de modo");
   Serial.println("--------------------------------");
 
-  STM.print("SP,10\n");
-  Serial.println(">> SP,10");
+  // SP inicial
+  STM.print("SP,");
+  STM.print(SP_CM);
+  STM.print("\n");
 }
 
-// ===============================
-// Loop
-// ===============================
-void loop() {
+void loop()
+{
   uint32_t now = millis();
 
-  // ---- Envío periódico de MODE ----
+  /* ===== Reenvío periódico de SP ===== */
+  if (now - lastSPSend >= SP_PERIOD_MS) {
+    lastSPSend = now;
+    STM.print("SP,");
+    STM.print(SP_CM);
+    STM.print("\n");
+  }
+
+  /* ===== Cambio automático de modo ===== */
   if (now - lastModeSend >= MODE_PERIOD_MS) {
     lastModeSend = now;
     mode = 1 - mode;
-
     STM.print("MODE,");
     STM.print(mode);
     STM.print("\n");
 
-    Serial.print(">> MODE,");
+    Serial.print(">> MODE cambiado a ");
     Serial.println(mode);
   }
 
-  // ---- Recepción STM32 ----
+  /* ===== Recepción UART ===== */
   while (STM.available()) {
     char c = (char)STM.read();
 
     if (c == '\n' || c == '\r') {
       if (rxIdx > 0) {
-        rxLine[rxIdx] = 0;
+        rxLine[rxIdx] = '\0';
         processLine(rxLine);
         rxIdx = 0;
       }
     } else {
       if (rxIdx < sizeof(rxLine) - 1) {
-        rxIdx++;
-        rxLine[rxIdx - 1] = c;
+        rxLine[rxIdx++] = c;
       } else {
-        rxIdx = 0; // overflow → reset
+        rxIdx = 0; // overflow seguro
       }
     }
   }
